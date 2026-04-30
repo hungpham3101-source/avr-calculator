@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 #define set_bit(reg,pos) reg|=(1<<pos)		// used to set bit x on register x to 1
 #define clr_bit(reg,pos) reg&=~(1<<pos)		// used to clear bit x on register x to 0

@@ -1,910 +1,768 @@
 #define F_CPU 8000000UL
-
 #include <avr/io.h>
 #include <util/delay.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
-
+ 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846 // Định nghĩa hằng số Pi nếu chưa có
+#endif
+ 
 /* =================================================================
- * PHẦN CỨNG:
- *   LCD 16x2  — PORTB:  PB0-PB3=D4-D7,  PB4=EN,  PB5=RS
- *   Keypad 4x6 — PORTA: PA0-PA3=Row A-D (INPUT  + pullup 0x0F)
- *                PORTC: PC0-PC5=Col 0-5  (OUTPUT, kéo thấp từng cột)
  *
- * KEYPAD LAYOUT:
- *   Col:      0      1    2    3    4      5
- *   Row A: [ON/C]  [ 7] [ 8] [ 9] [ x]  [ /]
- *   Row B: [+/-]   [ 4] [ 5] [ 6] [ -]  [MODE]
- *   Row C: [ % ]   [ 1] [ 2] [ 3] [ +]  [ UP]
- *   Row D: [ √ ]   [ 0] [ .]  [=]  [+]  [DOWN]
+PHẦN CỨNG: LCD 16x2 & Keypad 4x6 
  *
- * KEY INDEX (key_map[row][col]):
- *   Row A: 12  0  1  2   7  3
- *   Row B: 18  4  5  6  11 23
- *   Row C: 19  8  9 10  15 24
- *   Row D: 16 13 17 14  15 25
- *
- * PHÍM ĐẶC BIỆT:
- *   12 = ON/C (CLR)       23 = MODE (vào menu)
- *   24 = UP  (lên menu)   25 = DOWN (xuống menu)
- *   14 = = (tính/xác nhận)
- *   16 = √  (căn bậc 2)
- *   17 = .  (dấu chấm thập phân)
- *   18 = +/- (đảo dấu — chưa dùng trong code này)
- *   19 = %  (chưa dùng)
- *
- * MENU_MODE:
- *   0 = menu chính
- *   2 = Calc  (chuỗi phép tính, ưu tiên x/ trước +-)
- *   3 = Log   (log cơ số bất kỳ, hỗ trợ số thực)
- *   4 = PT2   (phương trình bậc 2)
- *   5 = Trig  (sin/cos/tan/cot, góc theo độ)
- *   6 = x^y   (lũy thừa)
- * ================================================================= */
-
-/* ================================================================
- * LCD — PORTB
- * FIX: tách riêng data nibble (PB0-PB3) và control (PB4=EN, PB5=RS)
- *      dùng mask 0xC0 để bảo vệ PB6-PB7, set/clr RS EN riêng biệt
- * ================================================================ */
+================================================================= */
+// Khai báo các chân giao tiếp LCD trên PORTB
 #define LCD_Port PORTB
 #define LCD_Dir  DDRB
 #define RS       PB5
 #define EN       PB4
-
-/* Ghi 4-bit data vào PB0-PB3, giữ nguyên PB4-PB7 */
+ 
+// Gửi 4 bit (nibble) dữ liệu hoặc lệnh ra LCD
 static inline void lcd_nibble(unsigned char n){
-    LCD_Port = (LCD_Port & 0xF0) | (n & 0x0F);
+   LCD_Port = (LCD_Port & 0xF0) | (n & 0x0F);
 }
-
-/* Xung EN */
+ 
+// Tạo xung kích hoạt (Enable pulse) để LCD đọc dữ liệu
 static inline void lcd_pulse(){
-    LCD_Port |=  (1<<EN);
-    _delay_us(50);
-    LCD_Port &= ~(1<<EN);
-    _delay_us(200);
+   LCD_Port |=  (1<<EN);
+   _delay_us(50);
+   LCD_Port &= ~(1<<EN);
+   _delay_us(200);
 }
-
+ 
+// Gửi mã lệnh (Command) cho LCD
 void LCD_Command(unsigned char cmnd){
-    LCD_Port &= ~(1<<RS);          /* RS=0: lệnh */
-    lcd_nibble(cmnd >> 4);         /* 4 bit cao */
-    lcd_pulse();
-    lcd_nibble(cmnd & 0x0F);       /* 4 bit thấp */
-    lcd_pulse();
-    if(cmnd==0x01 || cmnd==0x02) _delay_ms(2);
+   LCD_Port &= ~(1<<RS); // RS = 0 để gửi lệnh
+   lcd_nibble(cmnd >> 4); // Gửi 4 bit cao
+   lcd_pulse();
+   lcd_nibble(cmnd & 0x0F); // Gửi 4 bit thấp
+   lcd_pulse();
+   if(cmnd==0x01 || cmnd==0x02) _delay_ms(2); // Trễ lâu hơn cho lệnh xóa/về đầu
 }
-
+ 
+// Gửi một ký tự (Data) hiển thị lên LCD
 void LCD_Char(unsigned char data){
-    LCD_Port |=  (1<<RS);          /* RS=1: dữ liệu */
-    lcd_nibble(data >> 4);
-    lcd_pulse();
-    lcd_nibble(data & 0x0F);
-    lcd_pulse();
+   LCD_Port |= (1<<RS); // RS = 1 để gửi dữ liệu
+   lcd_nibble(data >> 4);
+   lcd_pulse();
+   lcd_nibble(data & 0x0F);
+   lcd_pulse();
 }
-
+ 
+// Khởi tạo LCD chế độ 4-bit
 void lcd_init(void){
-    LCD_Dir  = 0xFF;
-    _delay_ms(50);
-
-    LCD_Port &= ~(1<<RS);
-    LCD_Port &= ~(1<<EN);
-
-    /* Khởi tạo 4-bit mode chuẩn (3 lần 0x03 rồi 0x02) */
-    lcd_nibble(0x03); lcd_pulse(); _delay_ms(5);
-    lcd_nibble(0x03); lcd_pulse(); _delay_us(200);
-    lcd_nibble(0x03); lcd_pulse(); _delay_us(200);
-    lcd_nibble(0x02); lcd_pulse(); _delay_ms(2);
-
-    LCD_Command(0x28);  /* 4-bit, 2 dòng, 5x8 */
-    LCD_Command(0x0C);  /* Display ON, cursor OFF */
-    LCD_Command(0x06);  /* Entry mode: tăng địa chỉ */
-    LCD_Command(0x01);  /* Clear */
-    _delay_ms(2);
+   LCD_Dir  = 0xFF; // Cấu hình PORTB là output
+   _delay_ms(50);
+   LCD_Port &= ~(1<<RS);
+   LCD_Port &= ~(1<<EN);
+ 
+   // Trình tự khởi tạo chuẩn cho LCD 16x2 (chế độ 4-bit)
+   lcd_nibble(0x03); lcd_pulse(); _delay_ms(5);
+   lcd_nibble(0x03); lcd_pulse(); _delay_us(200);
+   lcd_nibble(0x03); lcd_pulse(); _delay_us(200);
+   lcd_nibble(0x02); lcd_pulse(); _delay_ms(2);
+ 
+   LCD_Command(0x28); // 4-bit mode, 2 dòng, font 5x8
+   LCD_Command(0x0C); // Bật hiển thị, tắt con trỏ
+   LCD_Command(0x06); // Tự động tăng con trỏ
+   LCD_Command(0x01); // Xóa màn hình
+   _delay_ms(2);
 }
-
+ 
+// Xóa màn hình LCD
 void lcd_clear(void){
-    LCD_Command(0x01);
-    _delay_ms(2);
+   LCD_Command(0x01);
+   _delay_ms(2);
 }
-
+ 
+// Di chuyển con trỏ LCD tới tọa độ (x, y)
 void lcd_gotoxy(int x, int y){
-    unsigned char addr = (y==0) ? 0x80 : 0xC0;
-    LCD_Command(addr + x);
+   unsigned char addr = (y==0) ? 0x80 : 0xC0; // 0x80 là dòng 1, 0xC0 là dòng 2
+   LCD_Command(addr + x);
 }
-
+ 
+// In chuỗi ký tự ra LCD
 void lcd_puts(const char *str){
-    while(*str) LCD_Char((unsigned char)*str++);
+   while(*str) LCD_Char((unsigned char)*str++);
 }
-
-/* ================================================================
- * KEYPAD — PORTA (hàng, input) + PORTC (cột, output)
- * FIX: thêm debounce đúng chỗ, đảm bảo PORTC reset sau mỗi cột
- * ================================================================ */
+ 
+/* =================================================================
+ *
+KEYPAD 4x6 — PORTA (hàng, input) + PORTC (cột, output)
+ *
+================================================================= */
+// Định nghĩa mã cho các phím chức năng đặc biệt
+#define KEY_ON_C   250
+#define KEY_MODE   251
+#define KEY_SHIFT  252
+#define KEY_SQRT   253
+#define KEY_DOWN   254
+ 
+// Khởi tạo cổng kết nối Keypad
 void key_init(){
-    DDRA  &= ~0x0F;    /* PA0-PA3: INPUT */
-    PORTA |=  0x0F;    /* pullup PA0-PA3 */
-    DDRC  |=  0x3F;    /* PC0-PC5: OUTPUT */
-    PORTC |=  0x3F;    /* tất cả cột HIGH (không kéo thấp) */
+   DDRA  &= ~0x0F; // PA0-PA3 (Hàng) là Input
+   PORTA |=  0x0F; // Bật điện trở kéo lên (Pull-up) cho Hàng
+   DDRC  |=  0x3F; // PC0-PC5 (Cột) là Output
+   PORTC |=  0x3F; // Mặc định Cột ở mức CAO
 }
-
+ 
+// Quét ma trận phím để xem phím nào đang được nhấn
 unsigned char key_scan(){
-    /*
-     * key_map[row][col] — FIX: Row D Col4 đổi từ 15 thành 20 (không dùng)
-     * để tránh trùng với Row C Col4 (phím +, key=15).
-     * Thực tế keypad vật lý chỉ có 1 phím + ở Row C Col4,
-     * Row D Col4 là phím thứ 2 không cần thiết → trả về 0xFF (bỏ qua).
-     */
-    const unsigned char key_map[4][6] = {
-        {12,  0,  1,  2,  7,  3},   /* A: ON/C, 7, 8, 9, x, /  */
-        {18,  4,  5,  6, 11, 23},   /* B: +/-, 4, 5, 6, -, MODE */
-        {19,  8,  9, 10, 15, 24},   /* C: %, 1, 2, 3, +, UP     */
-        {16, 13, 17, 14, 15, 25}    /* D: √, 0, ., =, (unused), DOWN */
-    };
-
-    for(uint8_t c=0; c<6; c++){
-        PORTC = (~(1<<c)) & 0x3F;   /* kéo thấp cột c */
-        _delay_us(10);
-
-        uint8_t r = 0xFF;
-        if(!(PINA & (1<<PA0))) r=0;
-        else if(!(PINA & (1<<PA1))) r=1;
-        else if(!(PINA & (1<<PA2))) r=2;
-        else if(!(PINA & (1<<PA3))) r=3;
-
-        PORTC |= (1<<c);            /* khôi phục cột c */
-
-        if(r != 0xFF){
-            _delay_ms(20);          /* debounce */
-            /* chờ nhả phím */
-            PORTC = (~(1<<c)) & 0x3F;
-            while(!(PINA & (1<<r)));
-            PORTC |= (1<<c);
-            PORTC  = 0x3F;
-
-            unsigned char k = key_map[r][c];
-            if(k == 22) return 0xFF; /* phím không dùng → bỏ qua */
-            return k;
-        }
-    }
-    PORTC = 0x3F;
-    return 0xFF;
+   // Bảng ánh xạ ký tự tương ứng với phím 4x6
+   const unsigned char key_map[4][6] = {
+      {KEY_ON_C, '7', '8', '9', 'x', '/'},       
+      {'(',      '4', '5', '6', '-', KEY_MODE},  
+      {')',      '1', '2', '3', '+', KEY_SHIFT}, 
+      {KEY_SQRT, '0', '.', '=', '+', KEY_DOWN}   
+   };
+ 
+   for(uint8_t c=0; c<6; c++){
+      PORTC = (~(1<<c)) & 0x3F; // Kéo lần lượt từng cột xuống LOW
+      _delay_us(10);
+ 
+      uint8_t r = 0xFF; // Khởi tạo cờ kiểm tra hàng
+      if(!(PINA & (1<<PA0))) r=0;
+      else if(!(PINA & (1<<PA1))) r=1;
+      else if(!(PINA & (1<<PA2))) r=2;
+      else if(!(PINA & (1<<PA3))) r=3;
+ 
+      PORTC |= (1<<c); // Trả cột về mức HIGH
+ 
+      // Nếu có phím được nhấn (r != 0xFF)
+      if(r != 0xFF){
+          _delay_ms(20);  // Chống dội phím (Debounce)
+          PORTC = (~(1<<c)) & 0x3F;
+          while(!(PINA & (1<<r))); // Chờ người dùng nhả phím
+          PORTC = 0x3F;
+          return key_map[r][c]; // Trả về mã phím
+      }
+   }
+   PORTC = 0x3F;
+   return 0xFF; // Không có phím nào được nhấn
 }
-
-/* ================================================================
- * HELPER CHUNG
- * FIX: is_digit_key thêm n==13 (phím "0" vật lý)
- * ================================================================ */
-int is_digit_key(int n){
-    return (n==0 ||n==1 ||n==2 ||
-            n==4 ||n==5 ||n==6 ||
-            n==8 ||n==9 ||n==10||
-            n==13);                 /* FIX: thêm 13 = phím "0" */
+ 
+/* =================================================================
+ *
+HELPER CHUNG & TỐI ƯU HIỂN THỊ
+ *
+================================================================= */
+#define SQRT_CHAR ((char)0xE8) // Mã ký tự căn bậc 2 (tùy ROM LCD)
+ 
+// Hàm tính lũy thừa, ưu tiên phép tính số nguyên chính xác nếu có thể
+float exact_pow(float base, float exp) {
+   if (floorf(base) == base && floorf(exp) == exp && exp >= 0.0f) {
+       long res = 1;
+       long b = (long)base;
+       int e = (int)exp;
+       for (int i = 0; i < e; i++) res *= b;
+       return (float)res;
+   }
+   return (float)pow((double)base, (double)exp);
 }
-
-int get_number(int n){
-    if(n==13) return 0;
-    if(n==8)  return 1; if(n==9)  return 2; if(n==10) return 3;
-    if(n==4)  return 4; if(n==5)  return 5; if(n==6)  return 6;
-    if(n==0)  return 7; if(n==1)  return 8; if(n==2)  return 9;
-    return 0;
+ 
+// Định dạng số float thành chuỗi hiển thị gọn gàng (cắt số 0 thừa)
+void format_display_float(float val, char *buf) {
+   dtostrf(val, 0, 4, buf); // Chuyển float sang chuỗi, 4 chữ số thập phân
+   int len = strlen(buf);
+   if (strchr(buf, '.')) { // Cắt bỏ các số 0 ở cuối
+       while (len > 0 && buf[len - 1] == '0') { buf[len - 1] = '\0'; len--; }
+       if (len > 0 && buf[len - 1] == '.') buf[len - 1] = '\0'; // Xóa luôn dấu chấm nếu k có thập phân
+   }
 }
-
+ 
+// Xử lý nhập liệu chung (số, dấu chấm, dấu trừ)
+void generic_input(char *buf, unsigned char key){
+   int blen = (int)strlen(buf);
+   if(blen >= 14) return; // Giới hạn độ dài chuỗi nhập
+   if(key >= '0' && key <= '9'){
+       char tmp[2] = {key, '\0'};
+       strcat(buf, tmp); // Nối số vào chuỗi
+   }
+   else if(key == '.'){
+       if(!strchr(buf, '.')){ // Đảm bảo chỉ có 1 dấu chấm
+            if(blen==0 || (blen==1 && buf[0]=='-')) strcat(buf, "0."); // Tự động thêm '0' nếu ấn '.' đầu tiên
+            else strcat(buf, ".");
+       }
+   }
+   else if(key == '-'){
+       if(blen == 0) strcpy(buf, "-"); // Chỉ cho phép dấu âm ở đầu
+   }
+}
+ 
 /*
- * generic_input — nhập số vào buf (hỗ trợ chữ số, dấu chấm, dấu âm)
- * FIX: giới hạn độ dài buf để tránh tràn
- */
-void generic_input(char *buf, int key){
-    int blen = (int)strlen(buf);
-    if(blen >= 14) return;          /* FIX: giới hạn 14 ký tự */
-
-    if(is_digit_key(key)){
-        int val = get_number(key);
-        char tmp[2]; tmp[0]='0'+val; tmp[1]='\0';
-        strcat(buf, tmp);
-    }
-    else if(key == 17){             /* dấu chấm thập phân */
-        if(!strchr(buf, '.')){
-            if(blen==0 || (blen==1 && buf[0]=='-'))
-                strcat(buf, "0.");
-            else
-                strcat(buf, ".");
-        }
-    }
-    else if(key == 11){             /* dấu âm (chỉ khi buf rỗng) */
-        if(blen == 0) strcpy(buf, "-");
-    }
-}
-
-/* ================================================================
- * CALC — MÁY TÍNH CHUỖI CÓ ƯU TIÊN TOÁN TỬ
+=================================================================
  *
- * Thuật toán Two-Stack:
- *   Bước 1: Duyệt op_stack, xử lý tất cả x/ ngay (ưu tiên cao)
- *   Bước 2: Xử lý tất cả +- từ trái sang phải
+CALC — SHUNTING-YARD PARSER PRO (Thuật toán chuyển đổi và tính toán)
  *
- * Ví dụ đúng:
- *   2+3x4=  → 14   (3x4=12 trước, rồi 2+12)
- *   6/2+1=  → 4    (6/2=3  trước, rồi 3+1)
- *   2+3+4=  → 9
- *   -5x-2=  → 10
- *   5/0=    → INF  (chia cho 0)
- *   √(16)→  → 4    (căn bậc 2 kết quả hoặc số đang nhập)
- *
- * Stack tối đa 8 số hạng — đủ cho biểu thức thực tế trên LCD
- * ================================================================ */
-#define STACK_SIZE 8
-
-float val_stack[STACK_SIZE];
-int   op_stack[STACK_SIZE];
-int   val_top    = 0;
-int   op_top     = 0;
-
-char  cur_buf[16] = "";    /* buffer số đang nhập */
-char  expr_buf[33]= "";    /* chuỗi biểu thức hiển thị */
-int   calc_done  = 0;
-float last_result= 0.0f;
-
-void calc_full_reset(){
-    val_top=0; op_top=0;
-    strcpy(cur_buf,  "");
-    strcpy(expr_buf, "");
-    calc_done=0; last_result=0.0f;
-}
-
-float apply_op(float a, int op, float b){
-    switch(op){
-        case 15: return a + b;
-        case 11: return a - b;
-        case 7:  return a * b;
-        case 3:
-            /* FIX: chia cho 0 → trả cờ INF rõ ràng */
-            if(fabsf(b) < 1e-30f) return 1e30f;
-            return a / b;
-    }
-    return b;
-}
-
-float calc_evaluate(){
-    /* Đẩy số cuối vào stack */
-    if(strlen(cur_buf) > 0 && val_top < STACK_SIZE){
-        val_stack[val_top++] = atof(cur_buf);
-    }
-    if(val_top == 0) return 0.0f;
-
-    /* Bước 1: xử lý x và / trước */
-    float tmp_val[STACK_SIZE];
-    int   tmp_op [STACK_SIZE];
-    int   vt=0, ot=0, i;
-
-    tmp_val[vt++] = val_stack[0];
-    for(i=0; i<op_top; i++){
-        if(op_stack[i]==7 || op_stack[i]==3){
-            float r = apply_op(tmp_val[vt-1], op_stack[i], val_stack[i+1]);
-            /* FIX: nếu kết quả chia cho 0 → dừng ngay, trả INF */
-            if(r > 1e29f) return 1e30f;
-            tmp_val[vt-1] = r;
-        } else {
-            tmp_op[ot++]  = op_stack[i];
-            tmp_val[vt++] = val_stack[i+1];
-        }
-    }
-
-    /* Bước 2: xử lý + và - */
-    float result = tmp_val[0];
-    for(i=0; i<ot; i++){
-        result = apply_op(result, tmp_op[i], tmp_val[i+1]);
-    }
-    return result;
-}
-
-char op_char(int op){
-    if(op==15) return '+';
-    if(op==11) return '-';
-    if(op==7)  return 'x';
-    if(op==3)  return '/';
-    return '?';
-}
-
-void calc_refresh(){
-    /* Dòng 0: biểu thức (16 ký tự cuối nếu dài hơn) */
-    char line0[17]={0};
-    int  elen=(int)strlen(expr_buf);
-    if(elen<=16) strncpy(line0,expr_buf,16);
-    else         strncpy(line0,expr_buf+elen-16,16);
-
-    /* Dòng 1: số đang nhập hoặc kết quả */
-    char line1[17]={0};
-    if(calc_done){
-        if(last_result>1e29f || last_result<-1e29f)
-            strcpy(line1,"INF");
-        else
-            dtostrf(last_result,0,4,line1);
-    } else if(strlen(cur_buf)>0){
-        strncpy(line1,cur_buf,16);
-    } else {
-        strcpy(line1,"_");
-    }
-
-    lcd_clear();
-    lcd_gotoxy(0,0); lcd_puts(line0);
-    lcd_gotoxy(0,1); lcd_puts(line1);
-}
-
-void calc_handle(unsigned char key){
-
-    /* --- ON/C: xóa sạch (không thoát menu) --- */
-    if(key==12){
-        calc_full_reset(); calc_refresh(); return;
-    }
-
-    /* --- √ (key=16): căn bậc 2 --- */
-    if(key==16){
-        float val;
-        int   from_result=0;
-
-        if(calc_done){
-            /* Căn bậc 2 của kết quả trước */
-            val=last_result; from_result=1;
-        } else if(strlen(cur_buf)>0){
-            val=atof(cur_buf);
-        } else {
-            return; /* chưa có số */
-        }
-
-        if(val<0.0f){
-            lcd_clear(); lcd_puts("Math Error");
-            lcd_gotoxy(0,1); lcd_puts("sqrt(<0)");
-            _delay_ms(1500);
-            calc_full_reset(); calc_refresh(); return;
-        }
-
-        float r=sqrtf(val);
-
-        if(from_result){
-            /* Thay thế kết quả bằng √(kết quả) */
-            last_result=r;
-            dtostrf(r,0,4,cur_buf);
-            strcpy(expr_buf,cur_buf);
-        } else {
-            /* Thay số đang nhập bằng √(số đó) */
-            int clen=(int)strlen(cur_buf);
-            int elen=(int)strlen(expr_buf);
-            if(elen>=clen) expr_buf[elen-clen]='\0';
-            dtostrf(r,0,4,cur_buf);
-            strcat(expr_buf,cur_buf);
-        }
-        calc_refresh(); return;
-    }
-
-    /* --- Nếu vừa có kết quả và nhấn số → biểu thức mới --- */
-    if(calc_done && (is_digit_key(key)||key==17)){
-        calc_full_reset();
-    }
-    /* --- Nếu vừa có kết quả và nhấn toán tử → tiếp tục từ kết quả --- */
-    if(calc_done && (key==15||key==11||key==7||key==3)){
-        /* FIX: reset calc_done trước khi xử lý toán tử */
-        calc_done=0;
-        strcpy(cur_buf,"");
-        strcpy(expr_buf,"");
-        dtostrf(last_result,0,4,cur_buf);
-        strcpy(expr_buf,cur_buf);
-        /* Tiếp tục xử lý toán tử bên dưới */
-    }
-
-    /* --- Nhập số hoặc dấu chấm --- */
-    if(is_digit_key(key)||key==17){
-        int old_len=(int)strlen(cur_buf);
-        generic_input(cur_buf,key);
-        int new_len=(int)strlen(cur_buf);
-        if(new_len>old_len){
-            if(key==17){
-                /* Thêm "0." hoặc "." vào expr_buf */
-                if(new_len==2 && cur_buf[0]=='0') strcat(expr_buf,"0.");
-                else strcat(expr_buf,".");
-            } else {
-                char tmp[2]; tmp[0]='0'+get_number(key); tmp[1]='\0';
-                if(strlen(expr_buf)<32) strcat(expr_buf,tmp);
-            }
-        }
-        calc_refresh(); return;
-    }
-
-    /* --- Dấu âm khi cur_buf rỗng --- */
-    if(key==11 && strlen(cur_buf)==0){
-        strcpy(cur_buf,"-");
-        if(strlen(expr_buf)<32) strcat(expr_buf,"-");
-        calc_refresh(); return;
-    }
-
-    /* --- Toán tử +, -, x, / --- */
-    if(key==15||key==11||key==7||key==3){
-        if(strlen(cur_buf)>0 && val_top<STACK_SIZE && op_top<STACK_SIZE){
-            val_stack[val_top++]=atof(cur_buf);
-            op_stack[op_top++]=key;
-            strcpy(cur_buf,"");
-            char sym[2]; sym[0]=op_char(key); sym[1]='\0';
-            if(strlen(expr_buf)<32) strcat(expr_buf,sym);
-            calc_refresh();
-        }
-        return;
-    }
-
-    /* --- "=" : tính kết quả --- */
-    if(key==14){
-        if(strlen(cur_buf)==0 && op_top==0) return;
-        if(strlen(cur_buf)==0) return; /* có toán tử nhưng chưa có số sau */
-
-        float res=calc_evaluate();
-        last_result=res;
-        calc_done=1;
-
-        /* Hiện "biểu_thức=" ở dòng 0 */
-        if(strlen(expr_buf)<32) strcat(expr_buf,"=");
-        calc_refresh();
-
-        /* Reset stack, giữ last_result */
-        val_top=0; op_top=0;
-        strcpy(cur_buf,"");
-        strcpy(expr_buf,"");
-        return;
-    }
-}
-
-/* ================================================================
- * MENU
- * FIX: reset calc_done khi chuyển mode để tránh trạng thái cũ
- * ================================================================ */
-int menu_mode  = 2;   /* Bắt đầu ở Calc */
+================================================================= */
+#define EXPR_MAX  64 // Độ dài tối đa biểu thức
+#define SY_STACK  32 // Độ lớn tối đa của stack
+ 
+// Định nghĩa mã lỗi
+#define VAL_INF   1e29f // Vô cực
+#define VAL_ERR   1e30f // Lỗi toán học
+ 
+int menu_mode  = 1; // 1: Calc, 2: Giải PT bậc 2
 int menu_index = 0;
-
-const char *menu_items[] = {"1.Calc","2.Log","3.PTB2","4.Trig","5.x^y"};
-
+int is_shift   = 0; // Cờ phím Shift
+ 
+// Hàm xác định mức độ ưu tiên của toán tử
+int sy_prec(char op){
+   if(op=='p' || op=='L') return 3; // Mũ (p) và Logarit (L) ưu tiên cao nhất
+   if(op=='x' || op=='/') return 2; // Nhân, chia
+   if(op=='+' || op=='-') return 1; // Cộng, trừ
+   return 0;
+}
+ 
+// Tính toán phép toán 2 ngôi
+float sy_apply_binary(float a, char op, float b){
+   if (op == '+') return a + b;
+   if (op == '-') return a - b;
+   if (op == 'x') return a * b;
+   if (op == '/') { 
+       if(fabsf(b) < 1e-30f) return (a >= 0 ? VAL_INF : -VAL_INF); // Lỗi chia cho 0
+       return a / b; 
+   }
+   if (op == 'p') {
+       if (a == 0 && b < 0) return VAL_INF; 
+       if (a < 0 && floorf(b) != b) return VAL_ERR; // Căn bậc chẵn của số âm
+       return exact_pow(a, b);
+   }
+   if (op == 'L') {
+       if (a <= 0 || a == 1.0f || b <= 0) return VAL_ERR; // Điều kiện loga(b): a>0, a!=1, b>0
+       return log10(b) / log10(a);
+   }
+   return b;
+}
+ 
+// Tính toán hàm toán học 1 ngôi (lượng giác, căn bậc 2)
+float sy_apply_unary(char op, float a) {
+   if (op == 's') return sin(a * M_PI / 180.0); // Tính theo độ (Degree)
+   if (op == 'c') return cos(a * M_PI / 180.0);
+   if (op == 't') {
+       if (fabs(cos(a * M_PI / 180.0)) < 1e-6) return VAL_INF; // Điểm gián đoạn của tan
+       return tan(a * M_PI / 180.0);
+   }
+   if (op == 'g') { // cotang
+       if (fabs(sin(a * M_PI / 180.0)) < 1e-6) return VAL_INF;
+       return 1.0 / tan(a * M_PI / 180.0);
+   }
+   if (op == 'r') {
+       if (a < 0) return VAL_ERR; // Căn bậc 2 số âm
+       return sqrt(a);
+   }
+   return a;
+}
+ 
+// Hàm phân tích và tính toán giá trị của biểu thức chuỗi (Thuật toán Shunting-yard)
+float sy_evaluate(const char *expr){
+   float val_stk[SY_STACK]; // Stack chứa giá trị (toán hạng)
+   char  op_stk[SY_STACK];  // Stack chứa toán tử
+   int   vt=0, ot=0, i=0;   // Chỉ số đỉnh của các stack
+   int   len_e=(int)strlen(expr);
+ 
+   while(i <= len_e){
+      char c = expr[i];
+      if(c==' '){ i++; continue; } // Bỏ qua khoảng trắng
+ 
+      // Xử lý dấu phần trăm
+      if(c=='%'){
+          if(vt<1) return VAL_ERR;
+          val_stk[vt-1] = val_stk[vt-1] / 100.0f;
+          i++; continue;
+      }
+ 
+      // Xử lý ngoặc đóng hoặc kết thúc chuỗi
+      if(c==')' || c=='\0'){
+          while(ot>0 && op_stk[ot-1]!='('){ // Lấy toán tử ra tính đến khi gặp ngoặc mở
+               char op = op_stk[--ot];
+               if(vt<2) return VAL_ERR;
+               float b = val_stk[--vt];
+               float a = val_stk[--vt];
+               val_stk[vt++] = sy_apply_binary(a, op, b); // Tính và đẩy kết quả lại vào stack
+          }
+          if(c==')' && ot>0 && op_stk[ot-1]=='(') {
+               ot--; // Loại bỏ dấu '(' khỏi stack
+               // Kích hoạt tính hàm 1 ngôi đằng trước ngoặc (nếu có: sin, cos...)
+               if (ot>0 && (op_stk[ot-1]=='s' || op_stk[ot-1]=='c' || op_stk[ot-1]=='t' || op_stk[ot-1]=='g' || op_stk[ot-1]=='r')) {
+                   char op = op_stk[--ot];
+                   if(vt<1) return VAL_ERR;
+                   val_stk[vt-1] = sy_apply_unary(op, val_stk[vt-1]);
+               }
+          }
+          if(c=='\0') break; // Nếu là cuối chuỗi thì dừng
+          i++; continue;
+      }
+ 
+      // Đẩy ngoặc mở hoặc toán tử hàm 1 ngôi vào stack toán tử
+      if(c=='(' || c=='s' || c=='c' || c=='t' || c=='g' || c=='r'){
+          if(ot<SY_STACK) op_stk[ot++]=c;
+          i++; continue;
+      }
+ 
+      // Lấy số (và dấu âm ở đầu/sau ngoặc/toán tử)
+      if((c>='0' && c<='9') ||
+         (c=='-' && (i==0 || expr[i-1]=='(' || expr[i-1]=='+' ||
+                     expr[i-1]=='-' || expr[i-1]=='x' || expr[i-1]=='/' || expr[i-1]=='p' || expr[i-1]=='L'))){
+          float sign=1.0f;
+          if(c=='-'){ sign=-1.0f; i++; c=expr[i]; }
+          float num=0.0f;
+          while(i<=len_e && expr[i]>='0' && expr[i]<='9'){ num=num*10.0f+(float)(expr[i]-'0'); i++; }
+          if(i<=len_e && expr[i]=='.'){
+               i++; float frac=0.1f;
+               while(i<=len_e && expr[i]>='0' && expr[i]<='9'){
+                   num+=(float)(expr[i]-'0')*frac; frac*=0.1f; i++;
+               }
+            }
+          if(vt<SY_STACK) val_stk[vt++]=sign*num; // Đẩy toán hạng vào stack giá trị
+          continue;
+      }
+ 
+      // Xử lý các toán tử 2 ngôi
+      if(c=='+' || c=='-' || c=='x' || c=='/' || c=='p' || c=='L'){
+          // Áp dụng phép toán đối với các toán tử có độ ưu tiên cao hơn hoặc bằng đang nằm trong stack
+          while(ot>0 && op_stk[ot-1]!='(' && sy_prec(op_stk[ot-1])>=sy_prec(c)){
+               char op = op_stk[--ot];
+               if(vt<2) return VAL_ERR;
+               float b = val_stk[--vt];
+               float a = val_stk[--vt];
+               val_stk[vt++] = sy_apply_binary(a, op, b);
+          }
+          if(ot<SY_STACK) op_stk[ot++]=c; // Đẩy toán tử hiện tại vào
+          i++; continue;
+      }
+      i++; // Bỏ qua ký tự không hợp lệ
+   }
+ 
+   // Tính nốt phần còn lại trong stack
+   while(ot > 0) {
+       char op = op_stk[--ot];
+       if (op == '(') continue;
+       if (op == 's' || op == 'c' || op == 't' || op == 'g' || op == 'r') {
+            if (vt < 1) return VAL_ERR;
+            val_stk[vt-1] = sy_apply_unary(op, val_stk[vt-1]);
+       } else {
+            if (vt < 2) return VAL_ERR;
+            float b = val_stk[--vt];
+            float a = val_stk[--vt];
+            val_stk[vt++] = sy_apply_binary(a, op, b);
+       }
+   }
+ 
+   // Kết quả cuối cùng
+   if(vt==1) return val_stk[0];
+   return VAL_ERR;
+}
+ 
+char expr_buf[EXPR_MAX]  = ""; // Bộ đệm chứa biểu thức người dùng gõ
+int  calc_done   = 0;          // Cờ báo hiệu đã bấm '='
+float last_result= 0.0f;       // Biến lưu trữ kết quả lần tính trước (Ans)
+int  paren_depth = 0;          // Bộ đếm theo dõi số lượng ngoặc mở chưa đóng
+ 
+// Reset hoàn toàn trạng thái máy tính
+void calc_full_reset(){
+   strcpy(expr_buf, "");
+   calc_done   = 0;
+   last_result = 0.0f;
+   paren_depth = 0;
+   is_shift    = 0;
+}
+ 
+// Dịch các mã toán tử nội bộ thành chuỗi có thể đọc để hiện trên LCD
+void build_display_string(char *disp) {
+   disp[0] = '\0';
+   int len = strlen(expr_buf);
+   for(int i=0; i<len; i++) {
+       char c = expr_buf[i];
+       if(c == 's') strcat(disp, "sin");
+       else if(c == 'c') strcat(disp, "cos");
+       else if(c == 't') strcat(disp, "tan");
+       else if(c == 'g') strcat(disp, "cot");
+       else if(c == 'r') {
+            char sq[2] = {SQRT_CHAR, '\0'}; // Căn bậc 2
+            strcat(disp, sq);
+       }
+       else if(c == 'p') strcat(disp, "^"); // Mũ
+       else if(c == 'L') strcat(disp, "L"); // In chữ L gọn gàng (Logarit)
+       else {
+           // Copy trực tiếp các ký tự bình thường (số, +, -, x...)
+           int dl = strlen(disp);
+           disp[dl] = c; disp[dl+1] = '\0';
+       }
+   }
+}
+ 
+// Cập nhật nội dung trên màn hình LCD (chế độ Calculator)
+void calc_refresh(){
+   char disp[128]; 
+   build_display_string(disp); // Lấy chuỗi biểu thức để hiển thị
+   int  elen=(int)strlen(disp);
+   char line0[17]={0};
+   
+   // Cuộn màn hình để luôn hiển thị phần cuối của biểu thức dài
+   if(elen<=16) strcpy(line0, disp);
+   else         strncpy(line0, disp+elen-16, 16);
+ 
+   lcd_clear();
+   lcd_gotoxy(0,0); lcd_puts(line0);
+ 
+   // Gợi ý đóng ngoặc ở dòng thứ 2
+   if(!calc_done && paren_depth>0){
+      char hint[17]={0};
+      for(int h=0; h<paren_depth && h<8; h++) hint[h]='(';
+      strcat(hint," open");
+      lcd_gotoxy(0,1); lcd_puts(hint);
+   }
+ 
+   // Hiển thị chữ S nhỏ khi đang bật phím Shift
+   if (is_shift) {
+       lcd_gotoxy(15, 1); lcd_puts("S");
+   }
+}
+ 
+// Nhập một hàm (sin, cos, tan...) vào biểu thức
+void insert_function(char f) {
+   int elen = strlen(expr_buf);
+   if(elen < EXPR_MAX - 3) {
+       if(elen > 0) {
+            char last = expr_buf[elen-1];
+            // Tự động thêm dấu 'x' nếu trước đó là số hoặc ngoặc đóng (VD: 2sin -> 2*sin)
+            if((last >= '0' && last <= '9') || last == '.' || last == ')' || last == '%') {
+                strcat(expr_buf, "x");
+            }
+       }
+       char tmp[3] = {f, '(', '\0'}; // Cú pháp: mã_hàm + ngoặc mở
+       strcat(expr_buf, tmp);
+       paren_depth++;
+       calc_refresh();
+   }
+}
+ 
+// Nhập một toán tử (+, -, x, /, ^)
+void insert_operator(char op) {
+   int elen = strlen(expr_buf);
+   char last = elen ? expr_buf[elen-1] : '\0';
+   
+   // Tối ưu UX: Cho phép nhập số âm ở đầu hoặc ngay sau các dấu (, hàm, hoặc bất kỳ toán tử nào
+   if(elen == 0 || last == '(' || last == 's' || last == 'c' || last == 't' || last == 'g' || last == 'r' || 
+      last == '+' || last == '-' || last == 'x' || last == '/' || last == 'p' || last == 'L') {
+       if(op == '-') {
+            if (last != '-') { // Chống nhập 2 dấu trừ liên tiếp
+                if(strlen(expr_buf) < EXPR_MAX - 2) strcat(expr_buf, "-");
+                calc_refresh();
+            }
+       }
+       return;
+   }
+   // Thêm toán tử bình thường
+   if((last>='0' && last<='9') || last=='.' || last==')' || last=='%'){
+       char sym[2] = {op, '\0'};
+       if(strlen(expr_buf) < EXPR_MAX - 2) strcat(expr_buf, sym);
+       calc_refresh();
+   }
+}
+ 
+// Hàm điều phối xử lý theo phím bấm trong chức năng Máy tính (Calculator Mode)
+void calc_handle(unsigned char key){
+   // Nếu nhấn phím SHIFT
+   if (key == KEY_SHIFT) {
+       if (is_shift) {
+           // Tự nối kết quả cũ (Ans) nếu bấm Shift 2 lần ngay sau khi tính
+           if (calc_done) {
+               char tmp[16]; format_display_float(last_result, tmp);
+               calc_full_reset(); strcat(expr_buf, tmp);
+           }
+           insert_operator('p'); // Thêm phép mũ ^
+           is_shift = 0;
+       } else {
+           is_shift = 1; // Bật cờ Shift
+       }
+       calc_refresh();
+       return;
+   }
+ 
+   // Xử lý khi cờ Shift đang bật
+   if (is_shift) {
+       is_shift = 0;
+       // Bắt tính năng Ans nếu gọi hàm bằng Shift ngay sau khi ấn dấu '='
+       if (key == '1' || key == '2' || key == '3' || key == '4' || key == '5' || key == '6') {
+            if (calc_done) {
+                char tmp[16]; format_display_float(last_result, tmp);
+                calc_full_reset(); strcat(expr_buf, tmp);
+            }
+       }
+       
+       // Gán phím số cho các hàm lượng giác/logarit thông qua Shift
+       if (key == '1') insert_function('s'); // Shift + 1 = sin(
+       else if (key == '2') insert_function('c'); // Shift + 2 = cos(
+       else if (key == '3') insert_function('t'); // Shift + 3 = tan(
+       else if (key == '4') insert_function('g'); // Shift + 4 = cot(
+       else if (key == '5') insert_operator('L'); // L (Toán tử Logarit)
+       else if (key == '6') { // Shift + 6 = Thêm %
+           int elen = strlen(expr_buf);
+           char last = elen ? expr_buf[elen-1] : '\0';
+           if ((last >= '0' && last <= '9') || last == ')' || last == '.') {
+               if(strlen(expr_buf) < EXPR_MAX - 2) strcat(expr_buf, "%");
+           }
+       }
+       calc_refresh();
+       return;
+   }
+ 
+   // Nút ON/C: Bấm lần 1 để xóa 1 ký tự cuối (Backspace), nhấn sau khi bằng sẽ Clear (AC)
+   if (key == KEY_ON_C) {
+       int elen = (int)strlen(expr_buf);
+       if(calc_done || elen == 0){
+            calc_full_reset(); // Trở về 0 nếu đang rỗng hoặc vừa tính xong
+            lcd_clear(); lcd_gotoxy(0,0); lcd_puts("0");
+            return;
+       }
+       // Logic Backspace (Xóa lùi)
+       char removed = expr_buf[elen-1];
+       expr_buf[elen-1] = '\0';
+       // Quản lý ngoặc
+       if(removed == '(') {
+           paren_depth--;
+           int nlen = strlen(expr_buf);
+           if (nlen > 0) {
+               char last = expr_buf[nlen-1];
+               // Nếu lùi vào dấu ngoặc của các hàm lượng giác thì xóa luôn tên hàm
+               if (last=='s'||last=='c'||last=='t'||last=='g'||last=='r') {
+                   expr_buf[nlen-1] = '\0';
+               }
+           }
+       } else if(removed == ')') paren_depth++;
+       calc_refresh();
+       return;
+   }
+ 
+   // Nút = : Thực hiện tính toán
+   if (key == '=') {
+       int elen=(int)strlen(expr_buf);
+       if(elen==0) return;
+       char closed[EXPR_MAX+8];
+       strncpy(closed,expr_buf,EXPR_MAX); closed[EXPR_MAX]='\0';
+       // Tự động đóng các ngoặc còn thiếu
+       for(int ci=0; ci<paren_depth && strlen(closed)<EXPR_MAX+6; ci++) strcat(closed,")");
+  
+       float res=sy_evaluate(closed); // Gọi thuật toán xử lý chuỗi
+       last_result=res;
+       calc_done=1; // Cờ báo hiệu tính toán hoàn tất
+  
+       char disp[128]; build_display_string(disp);
+       char line0[17]={0};
+       int  clen=(int)strlen(disp);
+       if(clen<=15) strncpy(line0,disp,15);
+       else         strncpy(line0,disp+clen-15,15);
+       strcat(line0,"=");
+  
+       // Cảnh báo lỗi toán học
+       char line1[17]={0};
+       if(res >= 0.9e30f || res <= -0.9e30f) {
+           strcpy(line1, "Math Error");
+       } 
+       else if(res >= 0.9e29f || res <= -0.9e29f) {
+           strcpy(line1, "INF");
+       } 
+       else {
+           format_display_float(res, line1); // Chuyển kết quả sang chuỗi hiển thị
+       }
+  
+       lcd_clear();
+       lcd_gotoxy(0,0); lcd_puts(line0); // Dòng 1: Biểu thức + '='
+       lcd_gotoxy(0,1); lcd_puts(line1); // Dòng 2: Kết quả
+  
+       strcpy(expr_buf,""); paren_depth=0; // Làm sạch bộ đệm cho phép tính mới
+       return;
+   }
+ 
+   // Logic Ans: Nếu vừa tính xong, ấn số thì làm phép tính mới, ấn toán tử thì lấy lại kết quả cũ (Ans)
+   if (calc_done) {
+       if ((key>='0' && key<='9') || key=='.' || key=='(' || key==KEY_SQRT) {
+            calc_full_reset();
+       } else if (key=='+' || key=='-' || key=='x' || key=='/') {
+            char tmp[16]; format_display_float(last_result, tmp);
+            calc_full_reset();
+            strcat(expr_buf, tmp);
+            calc_done = 0;
+       } else {
+            return;
+       }
+   }
+ 
+   // Nút Căn bậc 2
+   if (key == KEY_SQRT) { 
+       if (calc_done) calc_full_reset();
+       insert_function('r'); return; 
+   }
+ 
+   // Nút số 0-9
+   if (key >= '0' && key <= '9') {
+       int elen = strlen(expr_buf);
+       char last = elen ? expr_buf[elen-1] : '\0';
+       // Tự động thêm 'x' nếu trước số là ngoặc đóng hoặc % (VD: )5 -> )*5)
+       if (last == ')' || last == '%') insert_operator('x'); 
+       
+       char tmp[2] = {key, '\0'};
+       if(strlen(expr_buf) < EXPR_MAX - 2) strcat(expr_buf, tmp);
+       calc_refresh();
+   }
+   // Nút dấu chấm thập phân
+   else if (key == '.') {
+       int elen=(int)strlen(expr_buf);
+       int start=elen;
+       // Tìm về ký tự bắt đầu của số thập phân hiện tại
+       while(start>0 && ((expr_buf[start-1]>='0' && expr_buf[start-1]<='9') || expr_buf[start-1]=='.')) start--;
+       int already=0;
+       for(int si=start; si<elen; si++) if(expr_buf[si]=='.') already=1;
+       // Nếu chưa có dấu chấm nào trong số này
+       if(!already && strlen(expr_buf)<EXPR_MAX-2){
+            char last=elen ? expr_buf[elen-1] : '\0';
+            // Tự chèn '0' nếu bấm '.' đầu tiên (VD: .5 -> 0.5)
+            if(elen==0 || last=='(' || last=='+' || last=='-' || last=='x' || last=='/' || last=='p' || last=='r' || last=='L') strcat(expr_buf,"0");
+            strcat(expr_buf,".");
+            calc_refresh();
+       }
+   }
+   // Các toán tử 4 phép tính
+   else if (key == '+' || key == '-' || key == 'x' || key == '/') {
+       insert_operator(key);
+   }
+   // Nút ngoặc mở '('
+   else if (key == '(') {
+       int elen = strlen(expr_buf);
+       char last = elen ? expr_buf[elen-1] : '\0';
+       // Tự nối dấu nhân 'x' (VD: 5( -> 5*( )
+       if ((last>='0' && last<='9') || last==')' || last=='%') insert_operator('x');
+       
+       if(strlen(expr_buf)<EXPR_MAX-2){
+           strcat(expr_buf,"("); paren_depth++; calc_refresh();
+       }
+   }
+   // Nút ngoặc đóng ')'
+   else if (key == ')') {
+       // Chỉ cho đóng khi đã có ngoặc mở
+       if(paren_depth > 0 && strlen(expr_buf)<EXPR_MAX-2){
+           strcat(expr_buf,")"); paren_depth--; calc_refresh();
+       }
+   }
+}
+ 
+/* =================================================================
+ *
+MAIN & MENU
+ *
+================================================================= */
+const char *menu_items[] = {"1.Calculator", "2.Giai PT Bac 2"};
+ 
+// Giao diện chọn Menu
 void show_menu(){
-    lcd_clear();
-    lcd_gotoxy(0,0); lcd_puts(">"); lcd_puts(menu_items[menu_index]);
-    lcd_gotoxy(0,1); lcd_puts(" "); lcd_puts(menu_items[(menu_index+1)%5]);
+   lcd_clear();
+   lcd_gotoxy(0,0); lcd_puts(">"); lcd_puts(menu_items[menu_index]); // Đánh dấu > ở lựa chọn hiện tại
+   lcd_gotoxy(0,1); lcd_puts(" "); lcd_puts(menu_items[(menu_index+1)%2]);
 }
-
-int trig_func=0;
-
-void show_trig_menu(){
-    lcd_clear();
-    if(trig_func==0){ lcd_puts(">sin"); lcd_gotoxy(0,1); lcd_puts(" cos"); }
-    else if(trig_func==1){ lcd_puts(">cos"); lcd_gotoxy(0,1); lcd_puts(" tan"); }
-    else if(trig_func==2){ lcd_puts(">tan"); lcd_gotoxy(0,1); lcd_puts(" cot"); }
-    else { lcd_puts(">cot"); lcd_gotoxy(0,1); lcd_puts(" sin"); }
-}
-
-/* ================================================================
- * MAIN
- * ================================================================ */
+ 
 int main(void){
-    lcd_init();
-    key_init();
-
-    /* Màn hình chào */
-    lcd_clear();
-    lcd_puts("Calculator");
-    lcd_gotoxy(0,1); lcd_puts("Ready...");
-    _delay_ms(1500);
-
-    /* Bắt đầu ở Calc */
-    calc_full_reset();
-    calc_refresh();
-
-    /* Biến PT2 */
-    float pt_a=0, pt_b=0, pt_c=0;
-    int   pt_step=0;
-    char  pt_buf[16]="";
-
-    /* Biến LOG */
-    float log_base=0;
-    int   log_step=0;
-    char  lb_buf[16]="";
-
-    /* Biến TRIG */
-    int   trig_step=0;
-    char  trig_buf[16]="";
-
-    /* Biến x^y */
-    float pow_base=0;
-    int   pow_step=0;
-    char  pow_buf[16]="";
-
-    while(1){
-        unsigned char key=key_scan();
-        if(key==0xFF) continue;
-
-        /* ============================================================
-         * PHÍM MODE (key=23): vào menu chính bất kỳ lúc nào
-         * FIX: reset calc_done khi chuyển mode
-         * ============================================================ */
-        if(key==23){
-            calc_done=0;           /* FIX */
-            menu_mode=0;
-            menu_index=0;
-            show_menu();
-            continue;
-        }
-
-        /* ============================================================
-         * MENU CHÍNH
-         * UP(24)=lên, DOWN(25)=xuống, =(14)=chọn
-         * ============================================================ */
-        if(menu_mode==0){
-            if(key==24){
-                menu_index=(menu_index==0)?4:menu_index-1;
-                show_menu();
-            }
-            else if(key==25){
-                menu_index=(menu_index+1)%5;
-                show_menu();
-            }
-            else if(key==14){
-                menu_mode=menu_index+2;
-                calc_done=0;       /* FIX: reset trước khi vào mode mới */
-                lcd_clear();
-
-                if(menu_mode==2){
-                    /* Calc */
-                    calc_full_reset(); calc_refresh();
-                }
-                else if(menu_mode==3){
-                    /* Log */
-                    log_step=0; log_base=0; strcpy(lb_buf,"");
-                    lcd_puts("Base b=");
-                }
-                else if(menu_mode==4){
-                    /* PT2 */
-                    pt_step=0; pt_a=0; pt_b=0; pt_c=0; strcpy(pt_buf,"");
-                    lcd_puts("a=");
-                }
-                else if(menu_mode==5){
-                    /* Trig */
-                    trig_func=0; trig_step=0; strcpy(trig_buf,"");
-                    show_trig_menu();
-                }
-                else if(menu_mode==6){
-                    /* x^y */
-                    pow_step=0; pow_base=0; strcpy(pow_buf,"");
-                    lcd_puts("Base x=");
-                }
-            }
-        }
-
-        /* ============================================================
-         * CALC — chuỗi phép tính có ưu tiên toán tử
-         * ON/C(12) = xóa, MODE(23) đã xử lý ở trên
-         * ============================================================ */
-        else if(menu_mode==2){
-            calc_handle(key);
-        }
-
-        /* ============================================================
-         * LOG — log_b(x) = ln(x)/ln(b)
-         *
-         * Bước 0: nhập base b → "="(14) xác nhận
-         * Bước 1: nhập x    → "="(14) tính
-         * ON/C(12) bước 0: xóa buffer, ON/C bước 1: về nhập base
-         *
-         * FIX: kiểm tra b<=0 hoặc b==1, kiểm tra x<=0
-         * FIX: hỗ trợ số thập phân qua generic_input
-         * ============================================================ */
-        else if(menu_mode==3){
-
-            if(key==12){
-                /* ON/C: nếu đang nhập x → về nhập base
-                         nếu đang nhập base → xóa buffer */
-                if(log_step==1){
-                    log_step=0; log_base=0; strcpy(lb_buf,"");
-                    lcd_clear(); lcd_puts("Base b=");
-                } else {
-                    strcpy(lb_buf,"");
-                    lcd_clear(); lcd_puts("Base b=");
-                }
-            }
-            else if(is_digit_key(key)||key==17||key==11){
-                generic_input(lb_buf,key);
-                lcd_clear();
-                if(log_step==0){ lcd_puts("Base b="); lcd_gotoxy(7,0); }
-                else            { lcd_puts("Value x="); lcd_gotoxy(8,0); }
-                lcd_puts(lb_buf);
-            }
-            else if(key==14){
-                if(log_step==0){
-                    float bv=atof(lb_buf);
-                    if(bv<=0.0f||(bv>0.9999f&&bv<1.0001f)){
-                        lcd_clear(); lcd_puts("Base Error!");
-                        lcd_gotoxy(0,1); lcd_puts("b>0 & b!=1");
-                        _delay_ms(1500);
-                        strcpy(lb_buf,"");
-                        lcd_clear(); lcd_puts("Base b=");
-                    } else {
-                        log_base=bv; log_step=1; strcpy(lb_buf,"");
-                        lcd_clear(); lcd_puts("Value x=");
-                    }
-                } else {
-                    float xv=atof(lb_buf);
-                    if(xv<=0.0f){
-                        lcd_clear(); lcd_puts("Value Error!");
-                        lcd_gotoxy(0,1); lcd_puts("x must be >0");
-                        _delay_ms(1500);
-                        strcpy(lb_buf,"");
-                        lcd_clear(); lcd_puts("Value x=");
-                    } else {
-                        float res=(float)(log((double)xv)/log((double)log_base));
-                        lcd_clear();
-                        /* FIX: hiện rõ "log_b(x)=" thay vì chỉ "Result:" */
-                        char b_str[8]; dtostrf(log_base,0,2,b_str);
-                        lcd_puts("log"); lcd_puts(b_str); lcd_puts("(x)=");
-                        lcd_gotoxy(0,1);
-                        char res_str[16]; dtostrf(res,0,4,res_str);
-                        lcd_puts(res_str);
-                        _delay_ms(2500);
-                        log_step=0; strcpy(lb_buf,"");
-                        lcd_clear(); lcd_puts("Base b=");
-                    }
-                }
-            }
-        }
-
-        /* ============================================================
-         * PT BẬC 2 — ax² + bx + c = 0
-         *
-         * "="(14) xác nhận từng bước (a→b→c→tính)
-         * ON/C(12): xóa số đang nhập
-         *
-         * FIX: dùng "=" để chuyển bước thay vì "/" để tránh nhầm phép tính
-         * FIX: kiểm tra a==0 trước khi sang bước b
-         * FIX: hỗ trợ số thập phân và số âm qua generic_input
-         * ============================================================ */
-        else if(menu_mode==4){
-
-            if(key==12){
-                /* ON/C: xóa số đang nhập */
-                strcpy(pt_buf,"");
-                lcd_clear();
-                if(pt_step==0) lcd_puts("a=");
-                else if(pt_step==1) lcd_puts("b=");
-                else lcd_puts("c=");
-            }
-            else if(is_digit_key(key)||key==17||key==11){
-                generic_input(pt_buf,key);
-                lcd_clear();
-                if(pt_step==0)      lcd_puts("a=");
-                else if(pt_step==1) lcd_puts("b=");
-                else                lcd_puts("c=");
-                lcd_puts(pt_buf);
-            }
-            else if(key==14){
-                if(pt_step==0){
-                    pt_a=atof(pt_buf);
-                    if(pt_a==0.0f){
-                        lcd_clear(); lcd_puts("a != 0 !");
-                        _delay_ms(1500);
-                        strcpy(pt_buf,""); lcd_clear(); lcd_puts("a=");
-                    } else {
-                        pt_step=1; strcpy(pt_buf,"");
-                        lcd_clear(); lcd_puts("b=");
-                    }
-                }
-                else if(pt_step==1){
-                    pt_b=atof(pt_buf);
-                    pt_step=2; strcpy(pt_buf,"");
-                    lcd_clear(); lcd_puts("c=");
-                }
-                else if(pt_step==2){
+   lcd_init(); // Khởi tạo màn hình
+   key_init(); // Khởi tạo bàn phím
+ 
+   // Màn hình khởi động
+   lcd_clear(); lcd_puts("Calculator");
+   lcd_gotoxy(0,1); lcd_puts("Is Ready...");
+   _delay_ms(1500);
+ 
+   calc_full_reset();
+   calc_refresh();
+ 
+   // Các biến phục vụ chế độ Giải Phương Trình Bậc 2
+   float pt_a=0, pt_b=0, pt_c=0;
+   int   pt_step=0; // Bước nhập liệu: 0 = nhập a, 1 = nhập b, 2 = nhập c
+   char  pt_buf[16]="";
+ 
+   while(1){
+      unsigned char key=key_scan();
+      if(key==0xFF) continue; // Quay lại nếu chưa bấm phím
+ 
+      // Nút Mode để chuyển sang Menu
+      if(key==KEY_MODE){
+          calc_done=0; menu_mode=0; menu_index=0;
+          show_menu();
+          continue;
+      }
+ 
+      // Nếu đang trong Menu (Mode 0)
+      if(menu_mode==0){
+          if(key==KEY_DOWN) { // Nút lên xuống để chọn
+               menu_index=(menu_index+1)%2; show_menu(); 
+          }
+          else if(key=='='){  // Bấm '=' để xác nhận chế độ
+               menu_mode=menu_index+1;
+               calc_done=0; lcd_clear();
+               if(menu_mode==1){ calc_full_reset(); calc_refresh(); } // Chọn máy tính thường
+               else if(menu_mode==2){ // Chọn giải phương trình
+                   pt_step=0; pt_a=0; pt_b=0; pt_c=0; strcpy(pt_buf,"");
+                   lcd_puts("a=");
+               }
+          }
+      }
+      // Mode 1: Chế độ máy tính khoa học (đã viết ở hàm calc_handle)
+      else if(menu_mode==1){ calc_handle(key); }
+      // Mode 2: Chế độ Giải phương trình bậc 2 (ax^2 + bx + c = 0)
+      else if(menu_mode==2){
+          if(key==KEY_ON_C){ // AC / Backspace
+               strcpy(pt_buf,""); lcd_clear();
+               if(pt_step==0)     lcd_puts("a=");
+               else if(pt_step==1) lcd_puts("b=");
+               else                lcd_puts("c=");
+          }
+          else if((key>='0' && key<='9') || key=='.' || key=='-'){ // Nhập liệu hệ số
+               generic_input(pt_buf,key); lcd_clear();
+               if(pt_step==0)     lcd_puts("a=");
+               else if(pt_step==1) lcd_puts("b=");
+               else                lcd_puts("c=");
+               lcd_puts(pt_buf); // Hiển thị hệ số đang gõ
+          }
+          else if(key=='='){ // Bấm = để chốt hệ số
+               if(pt_step==0){
+                    pt_a=atof(pt_buf); // Chuyển chuỗi thành Float
+                    if(pt_a==0.0f){ // Cảnh báo nếu a=0 (không phải PT bậc 2)
+                        lcd_clear(); lcd_puts("a != 0 !"); _delay_ms(1500); 
+                        strcpy(pt_buf,""); lcd_clear(); lcd_puts("a="); 
+                    } 
+                    else { pt_step=1; strcpy(pt_buf,""); lcd_clear(); lcd_puts("b="); } // Chuyển qua bước nhập B
+               } else if(pt_step==1){
+                    pt_b=atof(pt_buf); pt_step=2; strcpy(pt_buf,""); lcd_clear(); lcd_puts("c="); // Chuyển qua bước nhập C
+                } else if(pt_step==2){
                     pt_c=atof(pt_buf);
+                    
+                    // Tính Delta = b^2 - 4ac
                     float delta=pt_b*pt_b-4.0f*pt_a*pt_c;
                     lcd_clear();
                     char tmp[16];
-                    if(delta<0.0f){
-                        lcd_puts("No real roots");
-                    } else if(delta==0.0f){
+                    if(delta<0.0f){ // Vô nghiệm (nghiệm phức)
+                        lcd_puts("No real roots"); 
+                    }
+                    else if(delta==0.0f){ // Nghiệm kép
                         float x0=-pt_b/(2.0f*pt_a);
-                        lcd_puts("x="); dtostrf(x0,0,4,tmp); lcd_puts(tmp);
-                    } else {
+                        lcd_puts("x="); format_display_float(x0, tmp); lcd_puts(tmp);
+                    } else { // 2 nghiệm phân biệt
                         float sq=(float)sqrt((double)delta);
-                        float x1=(-pt_b+sq)/(2.0f*pt_a);
+                        float x1=(-pt_b+sq)/(2.0f*pt_a); 
                         float x2=(-pt_b-sq)/(2.0f*pt_a);
-                        lcd_puts("x1="); dtostrf(x1,0,3,tmp); lcd_puts(tmp);
-                        lcd_gotoxy(0,1);
-                        lcd_puts("x2="); dtostrf(x2,0,3,tmp); lcd_puts(tmp);
+                        lcd_puts("x1="); format_display_float(x1, tmp); lcd_puts(tmp);
+                        lcd_gotoxy(0,1); lcd_puts("x2="); format_display_float(x2, tmp); lcd_puts(tmp);
                     }
-                    _delay_ms(3000);
+                    _delay_ms(3000); // Đợi 3s hiển thị kết quả
+                    
+                    // Reset lại quá trình từ đầu (nhập a)
                     pt_step=0; pt_a=0; pt_b=0; pt_c=0;
-                    strcpy(pt_buf,"");
-                    lcd_clear(); lcd_puts("a=");
-                }
-            }
-        }
-
-        /* ============================================================
-         * TRIG — sin/cos/tan/cot (góc nhập theo độ, hỗ trợ số thực)
-         *
-         * trig_step=0: menu chọn hàm
-         *   UP(24)=lên, DOWN(25)=xuống, =(14)=chọn hàm
-         *
-         * trig_step=1: nhập góc
-         *   chữ số/dấu chấm → nhập
-         *   −(11) khi rỗng → góc âm
-         *   =(14) → tính
-         *   ON/C(12) → xóa buffer, về menu trig
-         *
-         * FIX: lcd_clear() trước khi hiện kết quả (tránh chồng màn hình)
-         * FIX: tan(90+180k°) và cot(0+180k°) → "INF" thay vì crash
-         * FIX: hiện rõ "sin(45)=" ở dòng 0, kết quả ở dòng 1
-         * ============================================================ */
-        else if(menu_mode==5){
-
-            if(trig_step==0){
-                if(key==24){
-                    trig_func=(trig_func==0)?3:trig_func-1;
-                    show_trig_menu();
-                }
-                else if(key==25){
-                    trig_func=(trig_func+1)%4;
-                    show_trig_menu();
-                }
-                else if(key==14){
-                    trig_step=1; strcpy(trig_buf,"");
-                    lcd_clear();
-                    if(trig_func==0)      lcd_puts("sin(deg)=");
-                    else if(trig_func==1) lcd_puts("cos(deg)=");
-                    else if(trig_func==2) lcd_puts("tan(deg)=");
-                    else                  lcd_puts("cot(deg)=");
-                }
-                else if(key==12){
-                    trig_func=0; show_trig_menu();
-                }
-            }
-            else {
-                if(key==12){
-                    /* ON/C: xóa buffer, về menu trig */
-                    strcpy(trig_buf,""); trig_step=0;
-                    show_trig_menu();
-                }
-                else if(is_digit_key(key)||key==17||key==11){
-                    generic_input(trig_buf,key);
-                    /* FIX: lcd_clear trước khi cập nhật */
-                    lcd_clear();
-                    if(trig_func==0)      lcd_puts("sin(");
-                    else if(trig_func==1) lcd_puts("cos(");
-                    else if(trig_func==2) lcd_puts("tan(");
-                    else                  lcd_puts("cot(");
-                    lcd_puts(trig_buf); lcd_puts(")");
-                }
-                else if(key==14){
-                    if(strlen(trig_buf)==0){
-                        lcd_clear(); lcd_puts("Enter angle!");
-                        _delay_ms(1500);
-                        lcd_clear();
-                        if(trig_func==0)      lcd_puts("sin(deg)=");
-                        else if(trig_func==1) lcd_puts("cos(deg)=");
-                        else if(trig_func==2) lcd_puts("tan(deg)=");
-                        else                  lcd_puts("cot(deg)=");
-                    } else {
-                        double rad=atof(trig_buf)*M_PI/180.0;
-                        double res=0.0;
-                        int    is_inf=0;
-                        char   res_str[16];
-
-                        switch(trig_func){
-                            case 0: res=sin(rad); break;
-                            case 1: res=cos(rad); break;
-                            case 2:
-                                if(fabs(cos(rad))<1e-6) is_inf=1;
-                                else res=tan(rad);
-                                break;
-                            case 3:
-                                if(fabs(sin(rad))<1e-6) is_inf=1;
-                                else res=cos(rad)/sin(rad);
-                                break;
-                        }
-
-                        /* FIX: lcd_clear trước khi hiện kết quả */
-                        lcd_clear();
-                        if(trig_func==0)      lcd_puts("sin(");
-                        else if(trig_func==1) lcd_puts("cos(");
-                        else if(trig_func==2) lcd_puts("tan(");
-                        else                  lcd_puts("cot(");
-                        lcd_puts(trig_buf); lcd_puts(")=");
-
-                        lcd_gotoxy(0,1);
-                        if(is_inf){
-                            lcd_puts("INF");
-                        } else {
-                            dtostrf((float)res,0,4,res_str);
-                            lcd_puts(res_str);
-                        }
-
-                        _delay_ms(2500);
-                        strcpy(trig_buf,""); trig_step=0;
-                        show_trig_menu();
-                    }
-                }
-            }
-        }
-
-        /* ============================================================
-         * x^y — LŨYTHỪA: pow(base, exp)
-         *
-         * Bước 0: nhập base x → "="(14) xác nhận
-         * Bước 1: nhập số mũ y → "="(14) tính
-         * ON/C(12): xóa buffer
-         *
-         * FIX: kiểm tra pow(0, số âm) → INF
-         * FIX: kiểm tra pow(số âm, số lẻ thập phân) → NaN → báo lỗi
-         * FIX: hiện rõ "x^y=" ở dòng 0 thay vì "Result:"
-         * ============================================================ */
-        else if(menu_mode==6){
-
-            if(key==12){
-                strcpy(pow_buf,"");
-                lcd_clear();
-                if(pow_step==0) lcd_puts("Base x=");
-                else            lcd_puts("Exp  y=");
-            }
-            else if(is_digit_key(key)||key==17||key==11){
-                generic_input(pow_buf,key);
-                lcd_clear();
-                if(pow_step==0) lcd_puts("Base x=");
-                else            lcd_puts("Exp  y=");
-                lcd_puts(pow_buf);
-            }
-            else if(key==14){
-                if(pow_step==0){
-                    pow_base=atof(pow_buf);
-                    pow_step=1; strcpy(pow_buf,"");
-                    lcd_clear(); lcd_puts("Exp  y=");
-                } else {
-                    float exp_y=atof(pow_buf);
-
-                    /* FIX: kiểm tra 0^(âm) */
-                    if(pow_base==0.0f && exp_y<0.0f){
-                        lcd_clear(); lcd_puts("Math Error");
-                        lcd_gotoxy(0,1); lcd_puts("0^neg undef");
-                        _delay_ms(1500);
-                        pow_step=0; strcpy(pow_buf,"");
-                        lcd_clear(); lcd_puts("Base x=");
-                        continue;
-                    }
-
-                    /* FIX: kiểm tra âm^thập_phân */
-                    if(pow_base<0.0f && floorf(exp_y)!=exp_y){
-                        lcd_clear(); lcd_puts("Math Error");
-                        lcd_gotoxy(0,1); lcd_puts("neg^frac err");
-                        _delay_ms(1500);
-                        pow_step=0; strcpy(pow_buf,"");
-                        lcd_clear(); lcd_puts("Base x=");
-                        continue;
-                    }
-
-                    float res=(float)pow((double)pow_base,(double)exp_y);
-
-                    /* FIX: hiện "x^y=" ở dòng 0 */
-                    lcd_clear();
-                    char bstr[8], estr[8];
-                    dtostrf(pow_base,0,2,bstr);
-                    dtostrf(exp_y,  0,2,estr);
-                    lcd_puts(bstr); lcd_puts("^"); lcd_puts(estr); lcd_puts("=");
-
-                    lcd_gotoxy(0,1);
-                    if(res>1e29f||res<-1e29f){
-                        lcd_puts("INF");
-                    } else {
-                        char res_str[16]; dtostrf(res,0,4,res_str);
-                        lcd_puts(res_str);
-                    }
-
-                    _delay_ms(2500);
-                    pow_step=0; strcpy(pow_buf,"");
-                    lcd_clear(); lcd_puts("Base x=");
-                }
-            }
-        }
-
-    } /* while(1) */
+                    strcpy(pt_buf,""); lcd_clear(); lcd_puts("a=");
+               }
+          }
+      }
+   }
 }
